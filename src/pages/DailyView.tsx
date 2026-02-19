@@ -3,7 +3,7 @@ import { format, addDays, subDays } from "date-fns";
 import { ChevronLeft, ChevronRight, CalendarDays, Wifi, WifiOff, RefreshCw, Loader2 } from "lucide-react";
 import { MealType, MenuItem } from "@/types";
 import { getMenuForDate } from "@/data/mockMenu";
-import { useMenuScraper } from "@/hooks/useMenuScraper";
+import { useMenuScraper } from "@/cloud/useMenuScraper";
 import MealSection from "@/components/menu/MealSection";
 import NutritionSummaryBar from "@/components/nutrition/NutritionSummaryBar";
 
