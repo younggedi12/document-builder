@@ -3,7 +3,7 @@ import { format, addDays, subDays } from "date-fns";
 import { ChevronLeft, ChevronRight, CalendarDays, Wifi, WifiOff, RefreshCw, Loader2 } from "lucide-react";
 import { MealType, MenuItem } from "@/types";
 import { getMenuForDate } from "@/data/mockMenu";
-import { useMenuScraper } from "@/cloud/useMenuScraper";
+import { useMenuFetcher } from "@/hooks/useMenuFetcher";
 import MealSection from "@/components/menu/MealSection";
 import NutritionSummaryBar from "@/components/nutrition/NutritionSummaryBar";
 
@@ -20,7 +20,7 @@ export default function DailyView() {
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [useLive, setUseLive] = useState(true);
 
-  const { data: liveData, isLoading, isError, refetch, isFetching } = useMenuScraper();
+  const { data: liveData, isLoading, isError, refetch, isFetching } = useMenuFetcher();
 
   // Mock data fallback
   const dateStr = format(currentDate, "yyyy-MM-dd");
