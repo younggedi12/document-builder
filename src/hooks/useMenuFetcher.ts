@@ -1,179 +1,141 @@
 import { useQuery } from "@tanstack/react-query";
-import { MenuItem } from "@/types";
-
-interface ParsedItem {
-  id: number;
-  name: string;
-  station: string;
-  calories: number;
-  dietary: {
-    vegetarian: boolean;
-    vegan: boolean;
-    glutenFree: boolean;
-  };
-}
+import { MenuItem, MealType } from "@/types";
+import { format } from "date-fns";
 
 /**
- * Parses menu items from the CampusDish HTML page content.
- * Looks for station headers and menu item patterns in the raw HTML.
+ * CampusDish JSON API response types (subset of fields we use)
  */
-function parseMenuFromHtml(html: string): ParsedItem[] {
-  const items: ParsedItem[] = [];
-  let itemId = 1;
-
-  // CampusDish renders menu data in structured HTML
-  // We parse station names and item details from the page content
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, "text/html");
-
-  // Look for station containers
-  const stationHeaders = doc.querySelectorAll(
-    '[class*="station"], [class*="Station"], h2, h3'
-  );
-
-  let currentStation = "General";
-
-  // Try structured approach: look for menu item elements
-  const menuItemEls = doc.querySelectorAll(
-    '[class*="menu-item"], [class*="MenuItem"], [class*="item-name"], [class*="ItemName"], [role="button"][class*="item"], a[href*="label"]'
-  );
-
-  if (menuItemEls.length > 0) {
-    menuItemEls.forEach((el) => {
-      const name = el.textContent?.trim();
-      if (!name || name.length < 2 || name.length > 100) return;
-
-      // Try to find the parent station
-      let parent = el.closest('[class*="station"], [class*="Station"]');
-      if (parent) {
-        const stationEl = parent.querySelector(
-          'h2, h3, [class*="station-name"], [class*="StationName"], [class*="header"]'
-        );
-        if (stationEl?.textContent) currentStation = stationEl.textContent.trim();
-      }
-
-      // Try to find calorie info nearby
-      let calories = 0;
-      const calorieEl =
-        el.querySelector('[class*="calor"], [class*="Calor"]') ||
-        el.parentElement?.querySelector('[class*="calor"], [class*="Calor"]');
-      if (calorieEl?.textContent) {
-        const match = calorieEl.textContent.match(/(\d+)/);
-        if (match) calories = parseInt(match[1], 10);
-      }
-
-      // Check dietary flags
-      const elHtml = el.innerHTML?.toLowerCase() || "";
-      const parentHtml = el.parentElement?.innerHTML?.toLowerCase() || "";
-      const context = elHtml + parentHtml;
-
-      items.push({
-        id: itemId++,
-        name,
-        station: currentStation,
-        calories,
-        dietary: {
-          vegetarian:
-            context.includes("vegetarian") || context.includes("vegan"),
-          vegan: context.includes("vegan"),
-          glutenFree:
-            context.includes("no gluten") || context.includes("gluten-free") || context.includes("glutenfree"),
-        },
-      });
-    });
-  }
-
-  // Fallback: try to extract from text patterns if structured parsing found nothing
-  if (items.length === 0) {
-    const text = doc.body?.textContent || "";
-    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      // Heuristic: lines that look like food item names (capitalized, reasonable length)
-      if (
-        line.length > 3 &&
-        line.length < 80 &&
-        /^[A-Z]/.test(line) &&
-        !line.includes("©") &&
-        !line.includes("http") &&
-        !line.startsWith("Menu") &&
-        !line.startsWith("Location") &&
-        !line.startsWith("Filter")
-      ) {
-        // Check if next line has calories
-        let calories = 0;
-        if (i + 1 < lines.length) {
-          const calMatch = lines[i + 1].match(/(\d+)\s*Cal/i);
-          if (calMatch) calories = parseInt(calMatch[1], 10);
-        }
-
-        if (calories > 0) {
-          items.push({
-            id: itemId++,
-            name: line,
-            station: currentStation,
-            calories,
-            dietary: { vegetarian: false, vegan: false, glutenFree: false },
-          });
-        }
-      }
-    }
-  }
-
-  return items;
+interface CDProduct {
+  ProductId: string;
+  MarketingName: string;
+  Description: string;
+  Calories: string;
+  IsVegan: boolean;
+  IsVegetarian: boolean;
+  IsGlutenFree: boolean;
 }
 
-function mapToMenuItem(item: ParsedItem): MenuItem {
-  return {
-    id: item.id,
-    name: item.name,
-    station: item.station,
-    dietary: item.dietary,
-    nutrition: {
-      calories: item.calories,
-      protein: 0,
-      carbs: 0,
-      fat: 0,
-    },
-    confidence: 0.7,
+interface CDMenuProduct {
+  MenuProductId: string;
+  StationId: string;
+  Product: CDProduct;
+}
+
+interface CDStation {
+  StationId: string;
+  Name: string;
+}
+
+interface CDMenuPeriod {
+  PeriodId: string;
+  Name: string;
+}
+
+interface CDApiResponse {
+  Date: string;
+  SelectedPeriodId: string;
+  Menu: {
+    MenuPeriods: CDMenuPeriod[];
+    MenuProducts: CDMenuProduct[];
+    MenuStations: CDStation[];
   };
 }
 
-const CAMPUS_DISH_URL =
-  "https://carleton.campusdish.com/LocationsAndMenus/TeraangaCommonsDiningHall";
+const LOCATION_ID = "24967"; // Teraanga Commons Dining Hall
+const BASE_API = "https://carleton.campusdish.com/api/menu/GetMenus";
 
-// allOrigins is a free, open-source CORS proxy: https://github.com/gnuns/allOrigins
-const CORS_PROXY = "https://api.allorigins.win/raw?url=";
+// List of free CORS proxies to try in order
+const CORS_PROXIES = [
+  (url: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`,
+  (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+];
 
-export function useMenuFetcher() {
+function mapCDToMenuItems(
+  data: CDApiResponse
+): { items: MenuItem[]; mealPeriod: string } {
+  const stationMap = new Map<string, string>();
+  for (const s of data.Menu.MenuStations) {
+    stationMap.set(s.StationId, s.Name);
+  }
+
+  // Determine current meal period name
+  const currentPeriod = data.Menu.MenuPeriods.find(
+    (p) => p.PeriodId === data.SelectedPeriodId
+  );
+  const mealPeriod = (currentPeriod?.Name || "Dinner").toLowerCase();
+
+  const items: MenuItem[] = data.Menu.MenuProducts.map((mp, idx) => {
+    const p = mp.Product;
+    const calories = parseInt(p.Calories, 10) || 0;
+
+    return {
+      id: idx + 1,
+      name: p.MarketingName || "Unknown Item",
+      station: stationMap.get(mp.StationId) || "General",
+      dietary: {
+        vegetarian: p.IsVegetarian || p.IsVegan,
+        vegan: p.IsVegan,
+        glutenFree: p.IsGlutenFree,
+      },
+      nutrition: {
+        calories,
+        protein: 0,
+        carbs: 0,
+        fat: 0,
+      },
+      confidence: 1.0, // Direct from API, not scraped
+    };
+  });
+
+  return { items, mealPeriod };
+}
+
+export function useMenuFetcher(dateOverride?: Date) {
   return useQuery<{
     mealPeriod: string;
     items: MenuItem[];
+    allPeriods: { id: string; name: string }[];
     scrapedAt: string;
   }>({
-    queryKey: ["live-menu"],
+    queryKey: ["live-menu", dateOverride?.toISOString()],
     queryFn: async () => {
-      const proxyUrl = `${CORS_PROXY}${encodeURIComponent(CAMPUS_DISH_URL)}`;
+      const dateStr = format(dateOverride || new Date(), "MM/dd/yyyy");
+      const apiUrl = `${BASE_API}?locationId=${LOCATION_ID}&date=${encodeURIComponent(dateStr)}`;
 
-      const response = await fetch(proxyUrl);
-      if (!response.ok) {
-        throw new Error(`Failed to fetch menu (${response.status})`);
+      let data: CDApiResponse | null = null;
+
+      for (const makeProxyUrl of CORS_PROXIES) {
+        try {
+          const proxyUrl = makeProxyUrl(apiUrl);
+          const response = await fetch(proxyUrl);
+          if (!response.ok) continue;
+
+          const raw = await response.json();
+          // allorigins wraps in { contents: "..." }
+          data = typeof raw.contents === "string" ? JSON.parse(raw.contents) : raw;
+          break;
+        } catch {
+          continue;
+        }
       }
 
-      const html = await response.text();
-      const parsed = parseMenuFromHtml(html);
+      if (!data) {
+        throw new Error("All CORS proxies failed. Try again later.");
+      }
 
-      // Detect meal period from page content
-      let mealPeriod = "dinner";
-      const lowerHtml = html.toLowerCase();
-      if (lowerHtml.includes("breakfast")) mealPeriod = "breakfast";
-      else if (lowerHtml.includes("lunch")) mealPeriod = "lunch";
+      if (!data.Menu?.MenuProducts?.length) {
+        throw new Error("No menu items available for this date/period");
+      }
+
+      const { items, mealPeriod } = mapCDToMenuItems(data);
 
       return {
         mealPeriod,
-        items: parsed.map(mapToMenuItem),
+        items,
+        allPeriods: data.Menu.MenuPeriods.map((p) => ({
+          id: p.PeriodId,
+          name: p.Name,
+        })),
         scrapedAt: new Date().toISOString(),
       };
     },
